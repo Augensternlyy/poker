@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>德州扑克筹码计算器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        [v-cloak] { display: none; }
+        .btn-action { transition: all 0.15s ease; }
+        .btn-action:active { transform: scale(0.95); }
+        .player-card { transition: all 0.3s ease; }
+        .player-card.folded { opacity: 0.5; }
+        .player-card.all-in { border-color: #f59e0b !important; }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-green-900 via-green-800 to-green-900 min-h-screen">
+    <div id="app" v-cloak class="container mx-auto px-4 py-6 max-w-lg">
+        <!-- 房间选择界面 -->
+        <div v-if="!hasJoined" class="space-y-6">
+            <div class="text-center">
+                <h1 class="text-3xl font-bold text-white mb-2">🃏 德州扑克</h1>
+                <p class="text-green-200">多人筹码计算器</p>
+            </div>
+
+            <div class="bg-white/10 backdrop-blur-sm rounded-2xl p-6 space-y-4">
+                <div>
+                    <label class="block text-green-200 mb-2 font-medium">你的昵称</label>
+                    <input v-model="playerName" type="text" placeholder="输入昵称"
+                        class="w-full px-4 py-3 rounded-xl bg-white/20 text-white placeholder-green-300/50 border border-white/20 focus:outline-none focus:border-green-400 text-lg">
+                </div>
+
+                <div class="flex gap-3">
+                    <button @click="createRoom" :disabled="!playerName || isLoading"
+                        class="flex-1 btn-action py-4 bg-gradient-to-r from-yellow-500 to-yellow-600 text-white font-bold rounded-xl text-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                        {{ isLoading ? '创建中...' : '创建房间' }}
+                    </button>
+                </div>
+
+                <div class="relative">
+                    <div class="absolute inset-0 flex items-center"><div class="w-full border-t border-white/20"></div></div>
+                    <div class="relative flex justify-center text-sm"><span class="px-2 bg-green-800 text-green-300">或</span></div>
+                </div>
+
+                <div>
+                    <label class="block text-green-200 mb-2 font-medium">房间号</label>
+                    <input v-model="roomCodeInput" type="text" placeholder="输入6位房间号"
+                        maxlength="6"
+                        class="w-full px-4 py-3 rounded-xl bg-white/20 text-white placeholder-green-300/50 border border-white/20 focus:outline-none focus:border-green-400 text-lg text-center tracking-widest">
+                </div>
+
+                <button @click="joinRoom" :disabled="!playerName || !roomCodeInput || isLoading"
+                    class="w-full btn-action py-4 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-bold rounded-xl text-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                    {{ isLoading ? '加入中...' : '加入房间' }}
+                </button>
+            </div>
+        </div>
+
+        <!-- 游戏界面 -->
+        <div v-else class="space-y-4">
+            <!-- 顶部信息栏 -->
+            <div class="bg-white/10 backdrop-blur-sm rounded-xl p-3 flex justify-between items-center">
+                <div class="text-white">
+                    <span class="text-green-300 text-sm">房间号:</span>
+                    <span class="font-mono font-bold text-lg ml-1">{{ roomCode }}</span>
+                </div>
+                <div class="flex gap-2">
+                    <button @click="copyRoomCode" class="px-3 py-1 bg-white/20 text-white rounded-lg text-sm btn-action">复制</button>
+                    <button @click="leaveRoom" class="px-3 py-1 bg-red-500/50 text-white rounded-lg text-sm btn-action">退出</button>
+                </div>
+            </div>
+
+            <!-- 底池显示 -->
+            <div class="bg-gradient-to-r from-yellow-600/80 to-yellow-500/80 backdrop-blur-sm rounded-2xl p-4 text-center">
+                <div class="text-yellow-100 text-sm mb-1">当前底池</div>
+                <div class="text-4xl font-bold text-white">{{ formatNumber(totalPot) }}</div>
+            </div>
+
+            <!-- 分池显示 -->
+            <div v-if="sidePots.length > 0" class="bg-white/10 backdrop-blur-sm rounded-xl p-3">
+                <div class="text-green-300 text-sm mb-2">分池 (Side Pots)</div>
+                <div v-for="(pot, idx) in sidePots" :key="pot.id"
+                    class="flex justify-between items-center py-2 border-b border-white/10 last:border-0">
+                    <div class="text-white text-sm">
+                        {{ pot.is_main ? '主池' : `分池 ${idx}` }}
+                        <span class="text-green-400 text-xs ml-2">({{ pot.player_names?.join(', ') || '-' }})</span>
+                    </div>
+                    <div class="text-yellow-400 font-bold">{{ formatNumber(pot.total_amount) }}</div>
+                </div>
+            </div>
+
+            <!-- 新一轮按钮 -->
+            <div v-if="totalBet > 0" class="flex gap-2">
+                <button @click="startNewRound" class="w-full btn-action py-3 bg-gradient-to-r from-purple-500 to-purple-600 text-white font-bold rounded-xl">
+                    🔄 新一轮
+                </button>
+            </div>
+
+            <!-- 玩家列表 -->
+            <div class="space-y-2">
+                <div v-for="player in players" :key="player.id"
+                    :class="['player-card bg-white/10 backdrop-blur-sm rounded-xl p-4', player.is_folded ? 'folded' : '', player.is_all_in ? 'all-in border-2' : 'border border-white/10']">
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="flex items-center gap-2">
+                            <span class="text-white font-bold text-lg">{{ player.name }}</span>
+                            <span v-if="player.is_folded" class="px-2 py-0.5 bg-gray-500 text-white text-xs rounded">弃牌</span>
+                            <span v-if="player.is_all_in" class="px-2 py-0.5 bg-yellow-500 text-white text-xs rounded">All-in</span>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-green-400 font-bold text-xl">{{ formatNumber(player.chips) }}</div>
+                            <div class="text-green-200 text-xs">筹码</div>
+                        </div>
+                    </div>
+                    <div class="flex justify-between items-center text-sm">
+                        <div class="text-white">
+                            本轮下注: <span class="text-yellow-400 font-bold">{{ formatNumber(player.bet) }}</span>
+                        </div>
+                        <div v-if="player.name === playerName && !player.is_folded && !player.is_all_in" class="flex gap-1">
+                            <input v-model.number="betAmount" type="number" min="1" :max="player.chips"
+                                class="w-20 px-2 py-1 rounded bg-white/20 text-white text-center border border-white/20">
+                        </div>
+                    </div>
+                    <!-- 当前玩家操作按钮 -->
+                    <div v-if="player.name === playerName && !player.is_folded && !player.is_all_in" class="grid grid-cols-4 gap-2 mt-3">
+                        <button @click="doAction('call')" :disabled="totalBet <= player.bet"
+                            class="btn-action py-2 bg-blue-500 text-white font-bold rounded-lg text-sm disabled:opacity-50">
+                            跟注
+                        </button>
+                        <button @click="doAction('bet')"
+                            class="btn-action py-2 bg-green-500 text-white font-bold rounded-lg text-sm">
+                            下注
+                        </button>
+                        <button @click="doAction('raise')"
+                            class="btn-action py-2 bg-orange-500 text-white font-bold rounded-lg text-sm">
+                            加注
+                        </button>
+                        <button @click="doAction('fold')"
+                            class="btn-action py-2 bg-red-500 text-white font-bold rounded-lg text-sm">
+                            弃牌
+                        </button>
+                    </div>
+                    <!-- All-in 按钮 -->
+                    <div v-if="player.name === playerName && !player.is_folded && !player.is_all_in" class="mt-2">
+                        <button @click="doAction('all_in')"
+                            class="w-full btn-action py-3 bg-gradient-to-r from-yellow-500 to-amber-500 text-white font-bold rounded-lg">
+                            All-In ({{ formatNumber(player.chips) }})
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 添加玩家按钮 -->
+            <button v-if="players.length < 9" @click="showAddPlayer = true"
+                class="w-full btn-action py-3 bg-white/20 text-white font-bold rounded-xl border-2 border-dashed border-white/30">
+                + 添加玩家
+            </button>
+
+            <!-- 添加玩家弹窗 -->
+            <div v-if="showAddPlayer" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+                <div class="bg-green-800 rounded-2xl p-6 w-full max-w-sm">
+                    <h3 class="text-white font-bold text-xl mb-4">添加玩家</h3>
+                    <input v-model="newPlayerName" type="text" placeholder="输入玩家昵称"
+                        class="w-full px-4 py-3 rounded-xl bg-white/20 text-white placeholder-green-300/50 border border-white/20 focus:outline-none mb-4">
+                    <div class="flex gap-3">
+                        <button @click="showAddPlayer = false; newPlayerName = ''"
+                            class="flex-1 py-3 bg-white/20 text-white font-bold rounded-xl">
+                            取消
+                        </button>
+                        <button @click="addPlayer" :disabled="!newPlayerName"
+                            class="flex-1 py-3 bg-blue-500 text-white font-bold rounded-xl disabled:opacity-50">
+                            添加
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 重置筹码弹窗 -->
+            <button @click="showResetConfirm = true"
+                class="w-full btn-action py-3 bg-red-500/30 text-white font-bold rounded-xl border border-red-500/50 mt-4">
+                重置所有筹码
+            </button>
+
+            <div v-if="showResetConfirm" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+                <div class="bg-green-800 rounded-2xl p-6 w-full max-w-sm">
+                    <h3 class="text-white font-bold text-xl mb-4">重置筹码</h3>
+                    <p class="text-green-200 mb-4">将所有玩家的筹码重置为初始值？</p>
+                    <div class="flex gap-3">
+                        <button @click="showResetConfirm = false"
+                            class="flex-1 py-3 bg-white/20 text-white font-bold rounded-xl">
+                            取消
+                        </button>
+                        <button @click="resetChips"
+                            class="flex-1 py-3 bg-red-500 text-white font-bold rounded-xl">
+                            确认重置
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+
+        // ===== 配置 Supabase =====
+        // 请在这里填入你的 Supabase URL 和 ANON KEY
+        const SUPABASE_URL = 'https://zqvbrmeoixrpczhqwakg.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_8SAt8oqAgoibLgmTFP3LLA_qW-ln5Eu';
+
+        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        createApp({
+            setup() {
+                // 状态
+                const hasJoined = ref(false);
+                const playerName = ref('');
+                const roomCode = ref('');
+                const roomCodeInput = ref('');
+                const players = ref([]);
+                const sidePots = ref([]);
+                const isLoading = ref(false);
+                const betAmount = ref(10);
+                const showAddPlayer = ref(false);
+                const newPlayerName = ref('');
+                const showResetConfirm = ref(false);
+                const currentRoundBet = ref(0);
+
+                let playersSubscription = null;
+                let potsSubscription = null;
+
+                // 计算属性
+                const totalPot = computed(() => {
+                    return sidePots.value.reduce((sum, pot) => sum + pot.total_amount, 0);
+                });
+
+                const totalBet = computed(() => {
+                    return players.value.reduce((sum, p) => sum + p.bet, 0);
+                });
+
+                const maxBet = computed(() => {
+                    return Math.max(...players.value.map(p => p.bet), 0);
+                });
+
+                // 方法
+                const generateRoomCode = () => {
+                    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+                    let code = '';
+                    for (let i = 0; i < 6; i++) {
+                        code += chars.charAt(Math.floor(Math.random() * chars.length));
+                    }
+                    return code;
+                };
+
+                const formatNumber = (num) => {
+                    return num?.toLocaleString() || '0';
+                };
+
+                const copyRoomCode = async () => {
+                    try {
+                        await navigator.clipboard.writeText(roomCode.value);
+                        alert('房间号已复制!');
+                    } catch (e) {
+                        alert('复制失败，请手动复制');
+                    }
+                };
+
+                const createRoom = async () => {
+                    if (!playerName.value.trim()) return;
+
+                    isLoading.value = true;
+                    try {
+                        const code = generateRoomCode();
+
+                        // 创建房间
+                        const { error: roomError } = await supabase
+                            .from('rooms')
+                            .insert([{ room_code: code, status: 'active' }]);
+
+                        if (roomError) throw roomError;
+
+                        // 添加当前玩家
+                        const { error: playerError } = await supabase
+                            .from('players')
+                            .insert([{
+                                room_code: code,
+                                name: playerName.value.trim(),
+                                chips: 1000,
+                                bet: 0
+                            }]);
+
+                        if (playerError) throw playerError;
+
+                        // 创建主池
+                        await supabase
+                            .from('pots')
+                            .insert([{
+                                room_code: code,
+                                player_names: [playerName.value.trim()],
+                                total_amount: 0,
+                                is_main: true
+                            }]);
+
+                        roomCode.value = code;
+                        hasJoined.value = true;
+
+                        await setupRealtime(code);
+                    } catch (error) {
+                        console.error('创建房间失败:', error);
+                        alert('创建房间失败，请重试');
+                    } finally {
+                        isLoading.value = false;
+                    }
+                };
+
+                const joinRoom = async () => {
+                    if (!playerName.value.trim() || !roomCodeInput.value.trim()) return;
+
+                    isLoading.value = true;
+                    try {
+                        // 检查房间是否存在
+                        const { data: room, error: roomError } = await supabase
+                            .from('rooms')
+                            .select('*')
+                            .eq('room_code', roomCodeInput.value.trim().toUpperCase())
+                            .single();
+
+                        if (roomError || !room) {
+                            alert('房间不存在');
+                            return;
+                        }
+
+                        // 检查是否已在房间中
+                        const { data: existingPlayer } = await supabase
+                            .from('players')
+                            .select('*')
+                            .eq('room_code', roomCodeInput.value.trim().toUpperCase())
+                            .eq('name', playerName.value.trim())
+                            .single();
+
+                        if (existingPlayer) {
+                            roomCode.value = roomCodeInput.value.trim().toUpperCase();
+                            hasJoined.value = true;
+                            await setupRealtime(roomCode.value);
+                            return;
+                        }
+
+                        // 添加玩家
+                        const { error: playerError } = await supabase
+                            .from('players')
+                            .insert([{
+                                room_code: roomCodeInput.value.trim().toUpperCase(),
+                                name: playerName.value.trim(),
+                                chips: 1000,
+                                bet: 0
+                            }]);
+
+                        if (playerError) throw playerError;
+
+                        // 更新主池的参与者列表
+                        const { data: mainPot } = await supabase
+                            .from('pots')
+                            .select('*')
+                            .eq('room_code', roomCodeInput.value.trim().toUpperCase())
+                            .eq('is_main', true)
+                            .single();
+
+                        if (mainPot) {
+                            const updatedNames = [...(mainPot.player_names || []), playerName.value.trim()];
+                            await supabase
+                                .from('pots')
+                                .update({ player_names: updatedNames })
+                                .eq('id', mainPot.id);
+                        }
+
+                        roomCode.value = roomCodeInput.value.trim().toUpperCase();
+                        hasJoined.value = true;
+
+                        await setupRealtime(roomCode.value);
+                    } catch (error) {
+                        console.error('加入房间失败:', error);
+                        alert('加入房间失败，请重试');
+                    } finally {
+                        isLoading.value = false;
+                    }
+                };
+
+                const setupRealtime = async (code) => {
+                    // 加载初始数据
+                    await loadRoomData(code);
+
+                    // 监听玩家变化
+                    playersSubscription = supabase
+                        .channel('players-channel')
+                        .on('postgres_changes', {
+                            event: '*',
+                            schema: 'public',
+                            table: 'players',
+                            filter: `room_code=eq.${code}`
+                        }, () => loadRoomData(code))
+                        .subscribe();
+
+                    // 监听分池变化
+                    potsSubscription = supabase
+                        .channel('pots-channel')
+                        .on('postgres_changes', {
+                            event: '*',
+                            schema: 'public',
+                            table: 'pots',
+                            filter: `room_code=eq.${code}`
+                        }, () => loadRoomData(code))
+                        .subscribe();
+                };
+
+                const loadRoomData = async (code) => {
+                    const [playersData, potsData] = await Promise.all([
+                        supabase.from('players').select('*').eq('room_code', code).order('created_at'),
+                        supabase.from('pots').select('*').eq('room_code', code).order('created_at')
+                    ]);
+
+                    players.value = playersData.data || [];
+                    sidePots.value = potsData.data || [];
+                };
+
+                const doAction = async (actionType) => {
+                    const player = players.value.find(p => p.name === playerName.value);
+                    if (!player || player.is_folded || player.is_all_in) return;
+
+                    const currentMaxBet = Math.max(...players.value.map(p => p.bet), 0);
+                    let amount = 0;
+
+                    switch (actionType) {
+                        case 'call':
+                            amount = currentMaxBet - player.bet;
+                            break;
+                        case 'bet':
+                            amount = Math.min(Math.max(betAmount.value || 10, 1), player.chips);
+                            break;
+                        case 'raise':
+                            amount = Math.min((currentMaxBet - player.bet) + (betAmount.value || 10), player.chips);
+                            break;
+                        case 'fold':
+                            await supabase
+                                .from('players')
+                                .update({ is_folded: true })
+                                .eq('id', player.id);
+                            return;
+                        case 'all_in':
+                            amount = player.chips;
+                            break;
+                    }
+
+                    if (amount <= 0) return;
+                    if (amount > player.chips) amount = player.chips;
+
+                    const isAllIn = amount >= player.chips;
+
+                    // 更新玩家状态
+                    const { error } = await supabase
+                        .from('players')
+                        .update({
+                            chips: player.chips - amount,
+                            bet: player.bet + amount,
+                            is_all_in: isAllIn
+                        })
+                        .eq('id', player.id);
+
+                    if (error) {
+                        console.error('操作失败:', error);
+                        alert('操作失败');
+                        return;
+                    }
+
+                    // 检查是否需要创建分池
+                    await checkAndCreateSidePots();
+                };
+
+                const checkAndCreateSidePots = async () => {
+                    const { data: currentPlayers } = await supabase
+                        .from('players')
+                        .select('*')
+                        .eq('room_code', roomCode.value);
+
+                    const activePlayers = currentPlayers.filter(p => !p.is_folded);
+                    const allInPlayers = activePlayers.filter(p => p.is_all_in);
+                    const notAllInPlayers = activePlayers.filter(p => !p.is_all_in);
+
+                    // 如果有 All-in 玩家，需要创建分池
+                    if (allInPlayers.length > 0 && notAllInPlayers.length > 0) {
+                        // 按 bet 金额排序
+                        const sortedByBet = [...activePlayers].sort((a, b) => a.bet - b.bet);
+
+                        for (let i = 0; i < sortedByBet.length - 1; i++) {
+                            const currentPlayer = sortedByBet[i];
+                            const nextPlayer = sortedByBet[i + 1];
+
+                            if (currentPlayer.is_all_in && currentPlayer.bet < nextPlayer.bet) {
+                                // 创建新的分池
+                                const excessAmount = nextPlayer.bet - currentPlayer.bet;
+                                const eligiblePlayers = sortedByBet
+                                    .slice(i + 1)
+                                    .map(p => p.name);
+
+                                // 检查是否已存在类似的分池
+                                const { data: existingPot } = await supabase
+                                    .from('pots')
+                                    .select('*')
+                                    .eq('room_code', roomCode.value)
+                                    .eq('is_main', false)
+                                    .order('created_at', { ascending: false })
+                                    .limit(1)
+                                    .single();
+
+                                // 计算主池金额（所有玩家都能参与的）
+                                const mainPotAmount = currentPlayer.bet * (i + 1);
+
+                                // 更新主池
+                                const { data: mainPot } = await supabase
+                                    .from('pots')
+                                    .select('*')
+                                    .eq('room_code', roomCode.value)
+                                    .eq('is_main', true)
+                                    .single();
+
+                                if (mainPot) {
+                                    await supabase
+                                        .from('pots')
+                                        .update({ total_amount: mainPotAmount })
+                                        .eq('id', mainPot.id);
+                                }
+
+                                // 更新或创建分池
+                                const sidePotAmount = activePlayers.reduce((sum, p) => {
+                                    if (p.bet > currentPlayer.bet) {
+                                        return sum + (p.bet - currentPlayer.bet);
+                                    }
+                                    return sum;
+                                }, 0);
+
+                                if (existingPot) {
+                                    await supabase
+                                        .from('pots')
+                                        .update({
+                                            total_amount: sidePotAmount,
+                                            player_names: eligiblePlayers
+                                        })
+                                        .eq('id', existingPot.id);
+                                } else {
+                                    await supabase
+                                        .from('pots')
+                                        .insert([{
+                                            room_code: roomCode.value,
+                                            player_names: eligiblePlayers,
+                                            total_amount: sidePotAmount,
+                                            is_main: false
+                                        }]);
+                                }
+
+                                break;
+                            }
+                        }
+                    }
+
+                    // 更新主池金额（简单情况，无 All-in）
+                    if (allInPlayers.length === 0) {
+                        const totalBet = activePlayers.reduce((sum, p) => sum + p.bet, 0);
+                        const { data: mainPot } = await supabase
+                            .from('pots')
+                            .select('*')
+                            .eq('room_code', roomCode.value)
+                            .eq('is_main', true)
+                            .single();
+
+                        if (mainPot) {
+                            await supabase
+                                .from('pots')
+                                .update({ total_amount: totalBet })
+                                .eq('id', mainPot.id);
+                        }
+                    }
+                };
+
+                const startNewRound = async () => {
+                    const updates = players.value.map(player =>
+                        supabase
+                            .from('players')
+                            .update({ bet: 0, is_folded: false, is_all_in: false })
+                            .eq('id', player.id)
+                    );
+
+                    await Promise.all(updates);
+
+                    // 重置主池
+                    const { data: mainPot } = await supabase
+                        .from('pots')
+                        .select('*')
+                        .eq('room_code', roomCode.value)
+                        .eq('is_main', true)
+                        .single();
+
+                    if (mainPot) {
+                        await supabase
+                            .from('pots')
+                            .update({ total_amount: 0 })
+                            .eq('id', mainPot.id);
+                    }
+
+                    // 删除所有分池
+                    await supabase
+                        .from('pots')
+                        .delete()
+                        .eq('room_code', roomCode.value)
+                        .eq('is_main', false);
+                };
+
+                const addPlayer = async () => {
+                    if (!newPlayerName.value.trim()) return;
+
+                    try {
+                        const { error } = await supabase
+                            .from('players')
+                            .insert([{
+                                room_code: roomCode.value,
+                                name: newPlayerName.value.trim(),
+                                chips: 1000,
+                                bet: 0
+                            }]);
+
+                        if (error) throw error;
+
+                        // 更新主池的参与者列表
+                        const { data: mainPot } = await supabase
+                            .from('pots')
+                            .select('*')
+                            .eq('room_code', roomCode.value)
+                            .eq('is_main', true)
+                            .single();
+
+                        if (mainPot) {
+                            const updatedNames = [...(mainPot.player_names || []), newPlayerName.value.trim()];
+                            await supabase
+                                .from('pots')
+                                .update({ player_names: updatedNames })
+                                .eq('id', mainPot.id);
+                        }
+
+                        showAddPlayer.value = false;
+                        newPlayerName.value = '';
+                    } catch (error) {
+                        console.error('添加玩家失败:', error);
+                        alert('添加失败，可能该昵称已存在');
+                    }
+                };
+
+                const resetChips = async () => {
+                    const updates = players.value.map(player =>
+                        supabase
+                            .from('players')
+                            .update({ chips: 1000, bet: 0, is_folded: false, is_all_in: false })
+                            .eq('id', player.id)
+                    );
+
+                    await Promise.all(updates);
+
+                    // 重置主池
+                    const { data: mainPot } = await supabase
+                            .from('pots')
+                            .select('*')
+                            .eq('room_code', roomCode.value)
+                            .eq('is_main', true)
+                            .single();
+
+                    if (mainPot) {
+                        await supabase
+                            .from('pots')
+                            .update({ total_amount: 0 })
+                            .eq('id', mainPot.id);
+                    }
+
+                    // 删除所有分池
+                    await supabase
+                        .from('pots')
+                        .delete()
+                        .eq('room_code', roomCode.value)
+                        .eq('is_main', false);
+
+                    showResetConfirm.value = false;
+                };
+
+                const leaveRoom = async () => {
+                    if (confirm('确定要退出房间吗？')) {
+                        const player = players.value.find(p => p.name === playerName.value);
+                        if (player) {
+                            await supabase.from('players').delete().eq('id', player.id);
+                        }
+
+                        if (playersSubscription) {
+                            playersSubscription.unsubscribe();
+                        }
+                        if (potsSubscription) {
+                            potsSubscription.unsubscribe();
+                        }
+
+                        hasJoined.value = false;
+                        roomCode.value = '';
+                        players.value = [];
+                        sidePots.value = [];
+                    }
+                };
+
+                onUnmounted(() => {
+                    if (playersSubscription) playersSubscription.unsubscribe();
+                    if (potsSubscription) potsSubscription.unsubscribe();
+                });
+
+                return {
+                    hasJoined,
+                    playerName,
+                    roomCode,
+                    roomCodeInput,
+                    players,
+                    sidePots,
+                    isLoading,
+                    betAmount,
+                    showAddPlayer,
+                    newPlayerName,
+                    showResetConfirm,
+                    totalPot,
+                    totalBet,
+                    maxBet,
+                    createRoom,
+                    joinRoom,
+                    doAction,
+                    startNewRound,
+                    addPlayer,
+                    resetChips,
+                    leaveRoom,
+                    copyRoomCode,
+                    formatNumber
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
