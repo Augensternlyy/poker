@@ -6,7 +6,7 @@
     <title>德州扑克筹码计算器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@db/db-js@2"></script>
     <style>
         [v-cloak] { display: none; }
         .btn-action { transition: all 0.15s ease; }
@@ -209,7 +209,8 @@
         const SUPABASE_URL = 'https://zqvbrmeoixrpczhqwakg.supabase.co';
         const SUPABASE_KEY = 'sb_publishable_8SAt8oqAgoibLgmTFP3LLA_qW-ln5Eu';
 
-        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        // 使用不同变量名避免与 CDN 引入的 supabase 冲突
+        const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
         createApp({
             setup() {
@@ -274,14 +275,14 @@
                         const code = generateRoomCode();
 
                         // 创建房间
-                        const { error: roomError } = await supabase
+                        const { error: roomError } = await db
                             .from('rooms')
                             .insert([{ room_code: code, status: 'active' }]);
 
                         if (roomError) throw roomError;
 
                         // 添加当前玩家
-                        const { error: playerError } = await supabase
+                        const { error: playerError } = await db
                             .from('players')
                             .insert([{
                                 room_code: code,
@@ -293,7 +294,7 @@
                         if (playerError) throw playerError;
 
                         // 创建主池
-                        await supabase
+                        const { error: potError } = await db
                             .from('pots')
                             .insert([{
                                 room_code: code,
@@ -302,13 +303,15 @@
                                 is_main: true
                             }]);
 
+                        if (potError) throw potError;
+
                         roomCode.value = code;
                         hasJoined.value = true;
 
                         await setupRealtime(code);
                     } catch (error) {
                         console.error('创建房间失败:', error);
-                        alert('创建房间失败，请重试');
+                        alert('创建房间失败: ' + (error.message || '未知错误'));
                     } finally {
                         isLoading.value = false;
                     }
@@ -319,38 +322,44 @@
 
                     isLoading.value = true;
                     try {
+                        const code = roomCodeInput.value.trim().toUpperCase();
+
                         // 检查房间是否存在
-                        const { data: room, error: roomError } = await supabase
+                        const { data: room, error: roomError } = await db
                             .from('rooms')
                             .select('*')
-                            .eq('room_code', roomCodeInput.value.trim().toUpperCase())
+                            .eq('room_code', code)
                             .single();
 
-                        if (roomError || !room) {
-                            alert('房间不存在');
+                        if (roomError) {
+                            if (roomError.code === 'PGRST116') {
+                                alert('房间不存在，请检查房间号');
+                            } else {
+                                throw roomError;
+                            }
                             return;
                         }
 
                         // 检查是否已在房间中
-                        const { data: existingPlayer } = await supabase
+                        const { data: existingPlayer } = await db
                             .from('players')
                             .select('*')
-                            .eq('room_code', roomCodeInput.value.trim().toUpperCase())
+                            .eq('room_code', code)
                             .eq('name', playerName.value.trim())
                             .single();
 
                         if (existingPlayer) {
-                            roomCode.value = roomCodeInput.value.trim().toUpperCase();
+                            roomCode.value = code;
                             hasJoined.value = true;
                             await setupRealtime(roomCode.value);
                             return;
                         }
 
                         // 添加玩家
-                        const { error: playerError } = await supabase
+                        const { error: playerError } = await db
                             .from('players')
                             .insert([{
-                                room_code: roomCodeInput.value.trim().toUpperCase(),
+                                room_code: code,
                                 name: playerName.value.trim(),
                                 chips: 1000,
                                 bet: 0
@@ -359,28 +368,28 @@
                         if (playerError) throw playerError;
 
                         // 更新主池的参与者列表
-                        const { data: mainPot } = await supabase
+                        const { data: mainPot } = await db
                             .from('pots')
                             .select('*')
-                            .eq('room_code', roomCodeInput.value.trim().toUpperCase())
+                            .eq('room_code', code)
                             .eq('is_main', true)
                             .single();
 
                         if (mainPot) {
                             const updatedNames = [...(mainPot.player_names || []), playerName.value.trim()];
-                            await supabase
+                            await db
                                 .from('pots')
                                 .update({ player_names: updatedNames })
                                 .eq('id', mainPot.id);
                         }
 
-                        roomCode.value = roomCodeInput.value.trim().toUpperCase();
+                        roomCode.value = code;
                         hasJoined.value = true;
 
                         await setupRealtime(roomCode.value);
                     } catch (error) {
                         console.error('加入房间失败:', error);
-                        alert('加入房间失败，请重试');
+                        alert('加入房间失败: ' + (error.message || '未知错误'));
                     } finally {
                         isLoading.value = false;
                     }
@@ -391,32 +400,42 @@
                     await loadRoomData(code);
 
                     // 监听玩家变化
-                    playersSubscription = supabase
-                        .channel('players-channel')
+                    playersSubscription = db
+                        .channel('players-channel-' + code)
                         .on('postgres_changes', {
                             event: '*',
                             schema: 'public',
                             table: 'players',
                             filter: `room_code=eq.${code}`
-                        }, () => loadRoomData(code))
-                        .subscribe();
+                        }, (payload) => {
+                            console.log('Players changed:', payload);
+                            loadRoomData(code);
+                        })
+                        .subscribe((status) => {
+                            console.log('Players subscription status:', status);
+                        });
 
                     // 监听分池变化
-                    potsSubscription = supabase
-                        .channel('pots-channel')
+                    potsSubscription = db
+                        .channel('pots-channel-' + code)
                         .on('postgres_changes', {
                             event: '*',
                             schema: 'public',
                             table: 'pots',
                             filter: `room_code=eq.${code}`
-                        }, () => loadRoomData(code))
-                        .subscribe();
+                        }, (payload) => {
+                            console.log('Pots changed:', payload);
+                            loadRoomData(code);
+                        })
+                        .subscribe((status) => {
+                            console.log('Pots subscription status:', status);
+                        });
                 };
 
                 const loadRoomData = async (code) => {
                     const [playersData, potsData] = await Promise.all([
-                        supabase.from('players').select('*').eq('room_code', code).order('created_at'),
-                        supabase.from('pots').select('*').eq('room_code', code).order('created_at')
+                        db.from('players').select('*').eq('room_code', code).order('created_at'),
+                        db.from('pots').select('*').eq('room_code', code).order('created_at')
                     ]);
 
                     players.value = playersData.data || [];
@@ -441,7 +460,7 @@
                             amount = Math.min((currentMaxBet - player.bet) + (betAmount.value || 10), player.chips);
                             break;
                         case 'fold':
-                            await supabase
+                            await db
                                 .from('players')
                                 .update({ is_folded: true })
                                 .eq('id', player.id);
@@ -457,7 +476,7 @@
                     const isAllIn = amount >= player.chips;
 
                     // 更新玩家状态
-                    const { error } = await supabase
+                    const { error } = await db
                         .from('players')
                         .update({
                             chips: player.chips - amount,
@@ -477,7 +496,7 @@
                 };
 
                 const checkAndCreateSidePots = async () => {
-                    const { data: currentPlayers } = await supabase
+                    const { data: currentPlayers } = await db
                         .from('players')
                         .select('*')
                         .eq('room_code', roomCode.value);
@@ -503,7 +522,7 @@
                                     .map(p => p.name);
 
                                 // 检查是否已存在类似的分池
-                                const { data: existingPot } = await supabase
+                                const { data: existingPot } = await db
                                     .from('pots')
                                     .select('*')
                                     .eq('room_code', roomCode.value)
@@ -516,7 +535,7 @@
                                 const mainPotAmount = currentPlayer.bet * (i + 1);
 
                                 // 更新主池
-                                const { data: mainPot } = await supabase
+                                const { data: mainPot } = await db
                                     .from('pots')
                                     .select('*')
                                     .eq('room_code', roomCode.value)
@@ -524,7 +543,7 @@
                                     .single();
 
                                 if (mainPot) {
-                                    await supabase
+                                    await db
                                         .from('pots')
                                         .update({ total_amount: mainPotAmount })
                                         .eq('id', mainPot.id);
@@ -539,7 +558,7 @@
                                 }, 0);
 
                                 if (existingPot) {
-                                    await supabase
+                                    await db
                                         .from('pots')
                                         .update({
                                             total_amount: sidePotAmount,
@@ -547,7 +566,7 @@
                                         })
                                         .eq('id', existingPot.id);
                                 } else {
-                                    await supabase
+                                    await db
                                         .from('pots')
                                         .insert([{
                                             room_code: roomCode.value,
@@ -565,7 +584,7 @@
                     // 更新主池金额（简单情况，无 All-in）
                     if (allInPlayers.length === 0) {
                         const totalBet = activePlayers.reduce((sum, p) => sum + p.bet, 0);
-                        const { data: mainPot } = await supabase
+                        const { data: mainPot } = await db
                             .from('pots')
                             .select('*')
                             .eq('room_code', roomCode.value)
@@ -573,7 +592,7 @@
                             .single();
 
                         if (mainPot) {
-                            await supabase
+                            await db
                                 .from('pots')
                                 .update({ total_amount: totalBet })
                                 .eq('id', mainPot.id);
@@ -583,7 +602,7 @@
 
                 const startNewRound = async () => {
                     const updates = players.value.map(player =>
-                        supabase
+                        db
                             .from('players')
                             .update({ bet: 0, is_folded: false, is_all_in: false })
                             .eq('id', player.id)
@@ -592,7 +611,7 @@
                     await Promise.all(updates);
 
                     // 重置主池
-                    const { data: mainPot } = await supabase
+                    const { data: mainPot } = await db
                         .from('pots')
                         .select('*')
                         .eq('room_code', roomCode.value)
@@ -600,14 +619,14 @@
                         .single();
 
                     if (mainPot) {
-                        await supabase
+                        await db
                             .from('pots')
                             .update({ total_amount: 0 })
                             .eq('id', mainPot.id);
                     }
 
                     // 删除所有分池
-                    await supabase
+                    await db
                         .from('pots')
                         .delete()
                         .eq('room_code', roomCode.value)
@@ -618,7 +637,7 @@
                     if (!newPlayerName.value.trim()) return;
 
                     try {
-                        const { error } = await supabase
+                        const { error } = await db
                             .from('players')
                             .insert([{
                                 room_code: roomCode.value,
@@ -630,7 +649,7 @@
                         if (error) throw error;
 
                         // 更新主池的参与者列表
-                        const { data: mainPot } = await supabase
+                        const { data: mainPot } = await db
                             .from('pots')
                             .select('*')
                             .eq('room_code', roomCode.value)
@@ -639,7 +658,7 @@
 
                         if (mainPot) {
                             const updatedNames = [...(mainPot.player_names || []), newPlayerName.value.trim()];
-                            await supabase
+                            await db
                                 .from('pots')
                                 .update({ player_names: updatedNames })
                                 .eq('id', mainPot.id);
@@ -655,7 +674,7 @@
 
                 const resetChips = async () => {
                     const updates = players.value.map(player =>
-                        supabase
+                        db
                             .from('players')
                             .update({ chips: 1000, bet: 0, is_folded: false, is_all_in: false })
                             .eq('id', player.id)
@@ -664,7 +683,7 @@
                     await Promise.all(updates);
 
                     // 重置主池
-                    const { data: mainPot } = await supabase
+                    const { data: mainPot } = await db
                             .from('pots')
                             .select('*')
                             .eq('room_code', roomCode.value)
@@ -672,14 +691,14 @@
                             .single();
 
                     if (mainPot) {
-                        await supabase
+                        await db
                             .from('pots')
                             .update({ total_amount: 0 })
                             .eq('id', mainPot.id);
                     }
 
                     // 删除所有分池
-                    await supabase
+                    await db
                         .from('pots')
                         .delete()
                         .eq('room_code', roomCode.value)
@@ -692,15 +711,18 @@
                     if (confirm('确定要退出房间吗？')) {
                         const player = players.value.find(p => p.name === playerName.value);
                         if (player) {
-                            await supabase.from('players').delete().eq('id', player.id);
+                            await db.from('players').delete().eq('id', player.id);
                         }
 
                         if (playersSubscription) {
-                            playersSubscription.unsubscribe();
+                            await db.removeChannel(playersSubscription);
                         }
                         if (potsSubscription) {
-                            potsSubscription.unsubscribe();
+                            await db.removeChannel(potsSubscription);
                         }
+
+                        playersSubscription = null;
+                        potsSubscription = null;
 
                         hasJoined.value = false;
                         roomCode.value = '';
@@ -710,9 +732,24 @@
                 };
 
                 onUnmounted(() => {
-                    if (playersSubscription) playersSubscription.unsubscribe();
-                    if (potsSubscription) potsSubscription.unsubscribe();
+                    if (playersSubscription) db.removeChannel(playersSubscription);
+                    if (potsSubscription) db.removeChannel(potsSubscription);
                 });
+
+                // 测试 Supabase 连接
+                (async () => {
+                    try {
+                        const { error } = await db.from('rooms').select('id').limit(1);
+                        if (error) {
+                            console.error('Supabase 连接错误:', error);
+                            console.log('请检查：1. 表是否已创建 2. API Key 是否正确 3. RLS 策略是否已配置');
+                        } else {
+                            console.log('Supabase 连接成功！');
+                        }
+                    } catch (e) {
+                        console.error('Supabase 连接失败:', e);
+                    }
+                })();
 
                 return {
                     hasJoined,
